@@ -16,7 +16,7 @@ llm:
   max_retries: 4
   request_timeout_sec: 60
   json_strict: true
-  api_key: "sk-svcacct-1420saTIiKhKYi2OJbdV3MCydnI1SdkOBXy97ENY5lXfH69QBweMpcu6K6TUT3BlbkFJPkTBs9rdw2xSLCaLiBug-x_sCjBYvoGd4IEw7CXtfVu6u54861UFpxV-6YQA"
+  api_key: ""
   table_limit: null                  # null/0 -> all tables; set to e.g. 25 for quick test runs
   verify_ssl: false
   ca_bundle_path: "C:/certs/corp-root.pem"
@@ -135,3 +135,4 @@ connections:
     my_postgres:  "postgresql://myuser:mypassword@localhost:5432/mydatabase"
     my_postgres2: "postgresql://myuser:mypassword@localhost:55432/mydatabase2"
     my_postgres3: "postgresql://myuser:mypassword@localhost:55432/mydatabase2"     # Edit Accordingly
+
