@@ -1,0 +1,16 @@
+streamlit==1.37.1
+SQLAlchemy==2.0.32
+pyodbc==5.2.0
+pandas==2.2.2
+pyyaml==6.0.2
+sqlglot==25.6.0
+openpyxl==3.1.5
+requests==2.32.3
+
+# OpenAI SDK + httpx pin to avoid 'proxies' kwarg crash
+openai==1.37.0
+httpx==0.26.0
+certifi==2024.7.4
+
+# Optional (only if you want to test with Vanna)
+vanna==0.6.3

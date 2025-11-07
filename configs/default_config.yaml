@@ -1,0 +1,137 @@
+run_id: "devco_run"                  # used to version output folders
+output_dir: "outputs"                # base output path
+tenant_id: "ReportingDevCo"
+sample_rows_per_table: 500
+
+database:
+  # You can use EITHER a DSN or a raw ODBC string (raw is recommended here).
+  dsn: "ReportingDevCo"
+  # Raw ODBC string is URL-encoded by the pipeline helpers; leave as a raw ODBC string here:
+  odbc_connection_string: "Driver={ODBC Driver 17 for SQL Server};Server=DF2V-APSQL-Q02;Database=reporting_devco;Trusted_Connection=no;UID=vannaai;PWD=empyrean1;"
+
+llm:
+  enabled: true
+  model: "gpt-4.1"                   # or "gpt-4o-mini", etc.
+  temperature: 0.1
+  max_retries: 4
+  request_timeout_sec: 60
+  json_strict: true
+  api_key: "sk-svcacct-1420saTIiKhKYi2OJbdV3MCydnI1SdkOBXy97ENY5lXfH69QBweMpcu6K6TUT3BlbkFJPkTBs9rdw2xSLCaLiBug-x_sCjBYvoGd4IEw7CXtfVu6u54861UFpxV-6YQA"
+  table_limit: null                  # null/0 -> all tables; set to e.g. 25 for quick test runs
+  verify_ssl: false
+  ca_bundle_path: "C:/certs/corp-root.pem"
+  base_url: ""                       # leave blank unless using a gateway
+  # ---- logging & batching ----
+  log_dir: "artifacts/logs"
+  log_level: "INFO"                  # DEBUG | INFO | WARNING | ERROR
+  log_prompts: true
+  redact_values: ["api_key"]
+  max_input_bytes: 180000                 # ~180k chars across messages (tune to your model/context)
+  summary_max_rows: 200                   # clamp DF rows before summarizing
+  summary_max_cols: 40                    # clamp DF columns before summarizing
+  summary_max_chars_per_cell: 500         # clamp per-cell string length
+  docs_batch_size: 8
+  concepts_batch_size: 12
+  synonyms_batch_size: 200
+  system_prompt: |
+    You are a meticulous data analyst and metadata architect. You never invent columns or tables
+    that are not present in inputs. You normalize synonyms and business terms conservatively, with
+    provenance and confidence notes. Prefer short, precise definitions.
+
+# ------- Schema filters for bundle creation (ingest/profile) -------
+ingest:
+  schema_include: ["reporting"]      # [] or omit => all schemas
+
+profile:
+  schema_include: ["reporting"]
+
+limits:
+  llm_tables_max: null               # e.g., 50 to only process first 50 tables for testing
+
+docs:
+  batch_size: 8
+
+flow:
+  steps:
+    ingest_schema: true              # re-run ingestion when pipeline runs
+    profile_data: true               # re-run profiling when pipeline runs
+    build_docs_llm: true
+    build_concepts_llm: true
+    build_synonyms_llm: true
+    export_vanna_bundle: true
+  synonyms_mode: "llm"               # "llm" or "heuristic"
+
+inputs:
+  schema_json: "artifacts/schema.json"
+  relationships_json: "artifacts/relationships.json"
+  profiles_dir: "artifacts/profiles"
+  profiles_summary_csv: "artifacts/profiles_summary.csv"
+  heuristic_synonyms_json: "artifacts/synonyms.json"         # used if synonyms_mode=heuristic
+  heuristic_attribute_map_json: "artifacts/attribute_map.json"
+
+outputs:
+  docs_jsonl: "artifacts/schema_docs.jsonl"
+  concepts:
+    catalog_csv: "artifacts/concepts/concept_catalog.csv"
+    alias_csv: "artifacts/concepts/concept_alias.csv"
+    attributes_csv: "artifacts/concepts/concept_attributes.csv"
+    rules_csv: "artifacts/concepts/concept_rules.csv"
+  synonyms_json: "artifacts/synonyms.json"                   # produced by LLM mode
+  attribute_map_json: "artifacts/attribute_map.json"         # produced by LLM mode
+  vanna_bundle_dir: "artifacts/vanna_bundle"
+
+# ---------- Vanna orchestration ----------
+vanna:
+  # Defaults used when CLI flags don't pass names
+  sql:
+    mssql_db_name: "reporting_devco"   # key under connections.mssql
+    pg_store_name: "my_postgres2"      # key under connections.postgres (optional; else ChromaDB is used)
+
+  # Three instances to cover your A/B/C scenarios
+  # Methods supported in vanna_app_poc.py:
+  #   - info_schema
+  #   - bundle
+  #   - bundle_plus_info
+  #   - bundle_select
+  #   - bundle_select_plus_info
+  #
+  # bundle_parts (for the *select* methods) can include:
+  #   "ddl", "docs", "profiles", "schema", "relationships", "concepts", "synonyms", "attr_map", "values"
+  instances:
+    # A) Info schema only (schema-scoped)
+    - id: "A_info_only"
+      method: "info_schema"
+      mssql_db: "reporting_devco"
+      schema: "reporting"
+      pg_store: "my_postgres"         # optional; if omitted, ChromaDB is used
+      port: 8084
+
+    # B) Info schema + whole bundle
+    - id: "B_info_plus_bundle_whole"
+      method: "bundle_plus_info"
+      bundle_dir: "artifacts/vanna_bundle"
+      mssql_db: "reporting_devco"
+      schema: "reporting"
+      pg_store: "my_postgres2"
+      port: 8085
+
+    # C) Info schema + selected bundle elements (example: docs + concepts)
+    - id: "C_info_plus_selected"
+      method: "bundle_select_plus_info"
+      bundle_dir: "artifacts/vanna_bundle"
+      bundle_parts: ["docs", "concepts"]  # adjust as needed (e.g., ["docs"], ["docs","synonyms"], etc.)
+      mssql_db: "reporting_devco"
+      schema: "reporting"
+      pg_store: "my_postgres3"
+      port: 8086
+
+
+# ---------- Central connection strings (replaces dbAdapter.py) ----------
+connections:
+  mssql:
+    reporting_devco: "DRIVER={ODBC Driver 17 for SQL Server};SERVER=df2v-apsql-q02,1433;DATABASE=reporting_devco;UID=vannaai;PWD=empyrean1"
+    cornerstone_command: "DRIVER={ODBC Driver 17 for SQL Server};SERVER=df2v-apsql-c02,5013;DATABASE=cornerstone_command;UID=system-map;PWD=Re2Kba8vO5"
+  postgres:
+    my_postgres:  "postgresql://myuser:mypassword@localhost:5432/mydatabase"
+    my_postgres2: "postgresql://myuser:mypassword@localhost:55432/mydatabase2"
+    my_postgres3: "postgresql://myuser:mypassword@localhost:55432/mydatabase2"     # Edit Accordingly
