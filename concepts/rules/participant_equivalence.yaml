@@ -1,0 +1,5 @@
+id: participant_equivalence
+type: equivalence
+name: "Participant composition and alias"
+description: "In business semantics, 'participant' refers to the union of 'employee' and 'dependent'. Queries about 'participant' should consider both unless otherwise filtered."
+relation: "participant = member = employee union dependent"

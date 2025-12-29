@@ -1,0 +1,14 @@
+id: employee_smoker_from_tobacco
+type: derivation
+name: "Employee Smoker derivation from tobacco flag"
+description: "For employees, the concept 'smoker' is derived from the tobacco use flag."
+applies_to:
+  table: "reporting.EmployeeAttribute"        # <- adjust to your real table if different
+  source_column: "tobaccoflag"    # <- adjust to your real column
+  derived_concept: "smoker"
+logic_sql: |
+  CASE 
+    WHEN reporting.EmployeeAttribute.tobaccoflag IN ('Y', 'y', 1, '1', 'YES', 'Yes', 'True', 'TRUE') THEN 1
+    WHEN reporting.EmployeeAttribute.tobaccoflag IN ('N', 'n', 0, '0', 'NO', 'No', 'False', 'FALSE') THEN 0
+    ELSE NULL
+  END AS smoker

@@ -1,0 +1,5 @@
+id: subscriber_employee_equivalence
+type: equivalence
+name: "Subscriber alias"
+description: "In business semantics, 'subscriber' is the same as employee"
+relation: "subscriber = employee"

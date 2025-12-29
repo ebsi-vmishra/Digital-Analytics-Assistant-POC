@@ -1,17 +1,24 @@
 # scripts/synonyms_llm.py
 # End-to-end LLM-based synonyms builder with heuristic fallback, rich logging,
 # and optional table limiting via limits.llm_tables_max.
+#
+# Updates:
+# - Uses a dedicated synonyms system prompt (not the SQL system prompt).
+# - Applies lexical constraints from compiled_rules.json to attribute_map.
+# - Rebuilds synonyms.json from the filtered attribute_map so both stay aligned.
 
 import os
 import json
 import yaml
 import math
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
-from libs.log_utils import setup_logger
 
 import pandas as pd
+
+from libs.log_utils import setup_logger
 
 # --- project root import shim ---
 import sys
@@ -32,12 +39,17 @@ def read_json(path: str):
     p = Path(path)
     if not p.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
 
 def write_json(obj, path: str):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+
 
 def read_jsonl(path: str) -> List[dict]:
     p = Path(path)
@@ -57,8 +69,6 @@ def read_jsonl(path: str) -> List[dict]:
     return rows
 
 
-
-
 # -----------------------
 # Heuristic fallback
 # -----------------------
@@ -67,13 +77,13 @@ def _heuristic_synonyms_from_concepts(attrs_df: pd.DataFrame, alias_rows: List[D
     Build minimal synonyms and attribute_map from concept attributes + concept aliases when
     the LLM returns nothing.
 
-    FIX: concept alias column is 'alias_text' (not 'alias').
+    NOTE: concept alias column is 'alias_text' (not 'alias').
     """
     # concept_id -> list[alias]
     by_concept: Dict[str, List[str]] = {}
     for a in alias_rows or []:
         cid = str(a.get("concept_id") or "").strip()
-        al  = str(a.get("alias_text") or "").strip()  # <-- FIXED
+        al = str(a.get("alias_text") or "").strip()
         if cid and al:
             by_concept.setdefault(cid, []).append(al)
 
@@ -82,8 +92,8 @@ def _heuristic_synonyms_from_concepts(attrs_df: pd.DataFrame, alias_rows: List[D
 
     for _, r in attrs_df.iterrows():
         cid = str(r.get("concept_id") or "").strip()
-        t   = str(r.get("table") or "").strip()
-        c   = str(r.get("column") or "").strip()
+        t = str(r.get("table") or "").strip()
+        c = str(r.get("column") or "").strip()
         if not (cid and t and c):
             continue
 
@@ -109,10 +119,85 @@ def _heuristic_synonyms_from_concepts(attrs_df: pd.DataFrame, alias_rows: List[D
                     "alias": al,
                     "target": target,
                     "confidence": 0.6 if al.lower() == col_pretty.lower() else 0.5,
-                    "source": "concepts-heuristic"
+                    "source": "concepts-heuristic",
                 })
 
     return synonyms, attr_map
+
+
+# -----------------------
+# Lexical constraint helpers
+# -----------------------
+def _build_banned_pairs(compiled_rules: Dict) -> List[Tuple[str, str]]:
+    """
+    Extract (from, to) pairs from compiled_rules.policies where:
+      type: lexical_constraint
+      action: ban_substitution
+    All lowercased.
+    """
+    banned: List[Tuple[str, str]] = []
+    for p in (compiled_rules.get("policies") or []):
+        if (p.get("type") or "").lower() != "lexical_constraint":
+            continue
+        if (p.get("action") or "").lower() != "ban_substitution":
+            continue
+        fr = (p.get("from") or "").strip().lower()
+        to = (p.get("to") or "").strip().lower()
+        if fr and to:
+            banned.append((fr, to))
+    return banned
+
+
+def _target_tokens(target: str) -> List[str]:
+    """
+    Crude tokenization for target like 'reporting.EmployeeCoverageFact.Employee_Id':
+    splits on schema/table/col and grabs alphanumerics.
+    """
+    if not target:
+        return []
+    # Take table + column parts
+    parts = target.split(".")
+    tail = " ".join(parts[-2:]) if len(parts) >= 2 else target
+    return [t.lower() for t in re.findall(r"[A-Za-z0-9]+", tail)]
+
+
+def _apply_lexical_constraints_to_attr_map(
+    attr_map: List[Dict],
+    banned_pairs: List[Tuple[str, str]],
+    logger: logging.Logger,
+) -> List[Dict]:
+    """
+    Remove attribute_map rows that would realize a banned lexical substitution.
+    Example: ('dependent','employee') means:
+      if alias == 'dependent' and target tokens contain 'employee' → drop.
+    """
+    if not banned_pairs or not attr_map:
+        return attr_map
+
+    kept: List[Dict] = []
+    dropped = 0
+
+    for row in attr_map:
+        alias = (row.get("alias") or "").strip().lower()
+        target = (row.get("target") or "").strip()
+        tokens = _target_tokens(target)
+        if not alias or not target:
+            continue
+
+        bad = False
+        for fr, to in banned_pairs:
+            if alias == fr and to in tokens:
+                bad = True
+                break
+
+        if bad:
+            dropped += 1
+            continue
+        kept.append(row)
+
+    if dropped:
+        logger.info(f"Lexical constraints: dropped {dropped} attribute_map rows due to banned substitutions")
+    return kept
 
 
 # -----------------------
@@ -125,6 +210,7 @@ def _select_tables_from_attrs(attrs_df: pd.DataFrame) -> List[str]:
         if t:
             tset.add(t)
     return sorted(tset)
+
 
 def _build_prompt(
     schema: Dict,
@@ -164,10 +250,10 @@ def _build_prompt(
     for _, r in attrs_subset.iterrows():
         attrs_list.append({
             "concept_id": str(r.get("concept_id") or ""),
-            "tenant_id":  str(r.get("tenant_id") or ""),
-            "table":      str(r.get("table") or ""),
-            "column":     str(r.get("column") or ""),
-            "role":       str(r.get("role") or ""),
+            "tenant_id": str(r.get("tenant_id") or ""),
+            "table": str(r.get("table") or ""),
+            "column": str(r.get("column") or ""),
+            "role": str(r.get("role") or ""),
             "transform_sql": str(r.get("transform_sql") or ""),
         })
 
@@ -205,14 +291,18 @@ def _build_prompt(
 # Main builder
 # -----------------------
 def build_synonyms_llm(cfg: dict):
-    logger = setup_logger("synonyms_llm", (cfg.get("llm",{}) or {}).get("log_dir","artifacts/logs"),(cfg.get("llm",{}) or {}).get("log_level","INFO"))
+    logger = setup_logger(
+        "synonyms_llm",
+        (cfg.get("llm", {}) or {}).get("log_dir", "artifacts/logs"),
+        (cfg.get("llm", {}) or {}).get("log_level", "INFO"),
+    )
 
     # Inputs
-    schema_path           = cfg["inputs"]["schema_json"]
-    docs_path             = cfg["outputs"]["docs_jsonl"]
-    concept_catalog_path  = cfg["outputs"]["concepts"]["catalog_csv"]
-    concept_alias_path    = cfg["outputs"]["concepts"]["alias_csv"]
-    concept_attrs_path    = cfg["outputs"]["concepts"]["attributes_csv"]
+    schema_path = cfg["inputs"]["schema_json"]
+    docs_path = cfg["outputs"]["docs_jsonl"]
+    concept_catalog_path = cfg["outputs"]["concepts"]["catalog_csv"]
+    concept_alias_path = cfg["outputs"]["concepts"]["alias_csv"]
+    concept_attrs_path = cfg["outputs"]["concepts"]["attributes_csv"]
 
     # Outputs
     synonyms_out = cfg["outputs"]["synonyms_json"]
@@ -222,18 +312,16 @@ def build_synonyms_llm(cfg: dict):
     batch_size = int(cfg.get("llm", {}).get("synonyms_batch_size", 200))
 
     # Load inputs
-    schema    = read_json(schema_path) or {}
+    schema = read_json(schema_path) or {}
     docs_rows = read_jsonl(docs_path)
-    cat_df    = pd.read_csv(concept_catalog_path) if Path(concept_catalog_path).exists() else pd.DataFrame()
-    alias_df  = pd.read_csv(concept_alias_path) if Path(concept_alias_path).exists() else pd.DataFrame()
-    attrs_df  = pd.read_csv(concept_attrs_path) if Path(concept_attrs_path).exists() else pd.DataFrame()
+    cat_df = pd.read_csv(concept_catalog_path) if Path(concept_catalog_path).exists() else pd.DataFrame()
+    alias_df = pd.read_csv(concept_alias_path) if Path(concept_alias_path).exists() else pd.DataFrame()
+    attrs_df = pd.read_csv(concept_attrs_path) if Path(concept_attrs_path).exists() else pd.DataFrame()
 
     # Optional table limit (keep consistent with docs/concepts)
-    # If set, we will keep only attributes whose table is in the picked set.
     table_limit = int((cfg.get("limits") or {}).get("llm_tables_max") or 0)
     if table_limit > 0 and not attrs_df.empty and "table" in [c.lower() for c in attrs_df.columns]:
         selected_tables = set(pick_tables(schema, table_limit))
-        # normalize case for the column name
         table_col = [c for c in attrs_df.columns if c.lower() == "table"][0]
         before = len(attrs_df)
         attrs_df = attrs_df[attrs_df[table_col].astype(str).isin(selected_tables)].copy()
@@ -248,19 +336,20 @@ def build_synonyms_llm(cfg: dict):
     # Normalize expected column names
     def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
         cols = {c.lower(): c for c in df.columns}
+
         def pick(*names):
             for n in names:
                 if n in cols:
                     return cols[n]
             return None
+
         need = {
-            "concept_id":    pick("concept_id"),
-            "tenant_id":     pick("tenant_id"),
-            "table":         pick("table"),
-            "column":        pick("column"),
-            "role":          pick("role"),
+            "concept_id": pick("concept_id"),
+            "tenant_id": pick("tenant_id"),
+            "table": pick("table"),
+            "column": pick("column"),
+            "role": pick("role"),
             "transform_sql": pick("transform_sql"),
-            # alias_df uses alias_text (we won't rename here, we handle it where needed)
         }
         ren = {}
         for want, have in need.items():
@@ -269,8 +358,8 @@ def build_synonyms_llm(cfg: dict):
         return df.rename(columns=ren)
 
     attrs_df = _norm_cols(attrs_df)
-    cat_df   = _norm_cols(cat_df) if not cat_df.empty else cat_df
-    alias_df = alias_df  # keep as-is; remember to use 'alias_text' when reading
+    cat_df = _norm_cols(cat_df) if not cat_df.empty else cat_df
+    alias_df = alias_df  # keep as-is; uses alias_text
 
     # Build docs_by_table lookup (compact)
     docs_by_table: Dict[str, Dict] = {}
@@ -286,7 +375,7 @@ def build_synonyms_llm(cfg: dict):
             docs_by_table[t] = keep
 
     # Concept lists for prompt
-    cat_rows   = cat_df.to_dict(orient="records") if not cat_df.empty else []
+    cat_rows = cat_df.to_dict(orient="records") if not cat_df.empty else []
     alias_rows = alias_df.to_dict(orient="records") if not alias_df.empty else []
 
     # LLM client
@@ -308,6 +397,14 @@ def build_synonyms_llm(cfg: dict):
         log_prompts=cfg["llm"].get("log_prompts", True),
         redact_values=cfg["llm"].get("redact_values") or [],
         max_input_bytes=cfg["llm"].get("max_input_bytes", 180000),
+    )
+
+    # Dedicated synonyms system prompt (do NOT reuse SQL system prompt)
+    synonyms_system_prompt = (
+        "You are a meticulous metadata synonyms generator. "
+        "You ONLY return strict JSON valid for a synonyms and attribute_map object. "
+        "Use only the provided schema, docs, concepts, and attributes. "
+        "Never invent tables or columns."
     )
 
     # Batching
@@ -340,29 +437,30 @@ def build_synonyms_llm(cfg: dict):
 
         try:
             data = llm.json_completion(
-                system_prompt=cfg["llm"]["system_prompt"],
-                user_prompt=prompt
+                system_prompt=synonyms_system_prompt,
+                user_prompt=prompt,
             ) or {}
         except Exception as e:
             logger.error(f"Batch {bi+1} LLM error: {e}")
             data = {}
 
         # Minimal shape guard
-        syn  = data.get("synonyms") if isinstance(data, dict) else None
+        syn = data.get("synonyms") if isinstance(data, dict) else None
         amap = data.get("attribute_map") if isinstance(data, dict) else None
         if not isinstance(syn, dict):
             syn = {}
         if not isinstance(amap, list):
             amap = []
 
-        # Log small breadcrumbs
         syn_ct = sum(len(v or []) for v in syn.values())
         logger.info(
             f"Synonyms batch {bi+1}/{batches} -> "
             f"syn_targets={len(syn)}, syn_total_aliases={syn_ct}, attr_map_rows={len(amap)}"
         )
-        # Persist raw batch output for debug
-        (log_dir / f"batch_{bi+1:03d}.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        (log_dir / f"batch_{bi+1:03d}.json").write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
         # Merge into full results
         for tgt, aliases in syn.items():
@@ -385,18 +483,39 @@ def build_synonyms_llm(cfg: dict):
                         "alias": alias,
                         "target": target,
                         "confidence": max(0.0, min(1.0, conf)),
-                        "source": source or "concepts+docs"
+                        "source": source or "concepts+docs",
                     })
             except Exception:
                 # ignore bad rows
                 pass
 
-    # Fallback if the LLM yielded nothing
+    # Fallback if the LLM yielded nothing at all
     if not full_synonyms and not full_attr_map:
         logger.warning("LLM returned no synonyms/attr_map; building heuristic synonyms from concept aliases.")
         heur_syn, heur_map = _heuristic_synonyms_from_concepts(attrs_df, alias_rows)
         full_synonyms = heur_syn
         full_attr_map = heur_map
+
+    # Apply lexical constraints from compiled_rules.json (if present)
+    outputs_cfg = cfg.get("outputs") or {}
+    concepts_dir = Path(outputs_cfg.get("concepts_out_dir", "artifacts/concepts"))
+    compiled_rules_path = concepts_dir / "compiled_rules.json"
+    compiled_rules = read_json(str(compiled_rules_path)) or {}
+    banned_pairs = _build_banned_pairs(compiled_rules)
+    if banned_pairs:
+        full_attr_map = _apply_lexical_constraints_to_attr_map(full_attr_map, banned_pairs, logger)
+
+    # Rebuild synonyms from the final attribute_map so they stay aligned
+    rebuilt_synonyms: Dict[str, List[str]] = {}
+    for row in full_attr_map:
+        tgt = row.get("target")
+        al = row.get("alias")
+        if not tgt or not al:
+            continue
+        bucket = rebuilt_synonyms.setdefault(tgt, [])
+        if al not in bucket:
+            bucket.append(al)
+    full_synonyms = rebuilt_synonyms
 
     # Write outputs
     write_json(full_synonyms, synonyms_out)

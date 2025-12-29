@@ -1,11 +1,14 @@
 import shutil, os, json
 from pathlib import Path
 
+# utils/bundle_export.py
+import shutil, os, json
+from pathlib import Path
+
 def export_vanna_bundle(cfg):
     outdir = Path(cfg["outputs"]["vanna_bundle_dir"])
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # copy canonical artifacts (assuming DDL and documentation.md are optional)
     to_copy = [
         cfg["inputs"]["schema_json"],
         cfg["inputs"]["relationships_json"],
@@ -18,12 +21,19 @@ def export_vanna_bundle(cfg):
         cfg["outputs"]["concepts"]["attributes_csv"],
         cfg["outputs"]["concepts"]["rules_csv"],
     ]
-
     for p in to_copy:
         if p and os.path.exists(p):
             shutil.copy2(p, outdir / os.path.basename(p))
 
-    # Optional: generate documentation.md from docs_jsonl (simple rollup)
+    # NEW: pick up DDLs if present
+    ddl_dir = Path(cfg.get("outputs",{}).get("ddl_dir","artifacts/ddl"))
+    if ddl_dir.exists():
+        dest = outdir / "ddl"
+        dest.mkdir(exist_ok=True)
+        for f in ddl_dir.glob("*.sql"):
+            shutil.copy2(f, dest / f.name)
+    
+    # Optional: generate a simple documentation.md from docs_jsonl
     docs_md = outdir / "documentation.md"
     if os.path.exists(cfg["outputs"]["docs_jsonl"]):
         with open(cfg["outputs"]["docs_jsonl"], "r", encoding="utf-8") as fsrc, open(docs_md, "w", encoding="utf-8") as fdst:

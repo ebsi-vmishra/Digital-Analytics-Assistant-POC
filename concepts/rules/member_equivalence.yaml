@@ -1,0 +1,5 @@
+id: member_equivalence
+type: equivalence
+name: "Member composition"
+description: "In business semantics, 'member' refers to the union of 'employee' and 'dependent'. Queries about 'member' should consider both unless otherwise filtered."
+relation: "member = employee ∪ dependent"

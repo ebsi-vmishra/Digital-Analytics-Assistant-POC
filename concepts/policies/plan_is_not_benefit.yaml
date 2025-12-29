@@ -1,0 +1,6 @@
+- id: no_dep_to_emp_substitution
+  type: lexical_constraint
+  action: ban_substitution
+  from: "plan"
+  to: "benefit"
+  description: "Do NOT substitute 'plan' for 'benefit'. Treat them as distinct concepts."

@@ -16,7 +16,7 @@ llm:
   max_retries: 4
   request_timeout_sec: 60
   json_strict: true
-  api_key: ""
+  api_key: "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"
   table_limit: null                  # null/0 -> all tables; set to e.g. 25 for quick test runs
   verify_ssl: false
   ca_bundle_path: "C:/certs/corp-root.pem"
@@ -26,10 +26,7 @@ llm:
   log_level: "INFO"                  # DEBUG | INFO | WARNING | ERROR
   log_prompts: true
   redact_values: ["api_key"]
-  max_input_bytes: 180000                 # ~180k chars across messages (tune to your model/context)
-  summary_max_rows: 200                   # clamp DF rows before summarizing
-  summary_max_cols: 40                    # clamp DF columns before summarizing
-  summary_max_chars_per_cell: 500         # clamp per-cell string length
+  max_input_bytes: 180000
   docs_batch_size: 8
   concepts_batch_size: 12
   synonyms_batch_size: 200
@@ -51,15 +48,40 @@ limits:
 docs:
   batch_size: 8
 
+concepts:
+  rules_dir: "concepts/rules"
+  policies_dir: "concepts/policies"
+
 flow:
   steps:
-    ingest_schema: true              # re-run ingestion when pipeline runs
-    profile_data: true               # re-run profiling when pipeline runs
-    build_docs_llm: true
-    build_concepts_llm: true
-    build_synonyms_llm: true
-    export_vanna_bundle: true
+    # Core metadata
+    ingest: false          # builds infoschema/schema.json/relationships
+    profile: false         # builds profiling artifacts (profiles)
+    docs: false            # runs auto_docs_llm to create docs_jsonl
+    concepts: true        # runs build_concepts_llm
+    synonyms: true        # runs synonyms_llm / synonyms_map (synonyms + attr_map + values)
+    # Newer steps
+    export_ddl: true      # runs export_ddl.py → artifacts/ddl/*.sql
+    compile_concepts: true  # runs compile_concepts.py → concepts_prompt, compiled_rules
+    emit_system_prompt: true # runs emit_system_prompt.py → system_prompt.txt
+    export_bundle: true   # runs bundle_export → artifacts/vanna_bundle
   synonyms_mode: "llm"               # "llm" or "heuristic"
+
+# Training-time artifact toggles: used by Vanna app / batch harness / fidelity grid
+# Each key corresponds directly to one column in the grid:
+#   infoschema, docs, concepts, synonyms, schema, relationships,
+#   ddl, profiles, attr_map, values
+train_artifacts:
+  infoschema: true      # live schema / info schema training
+  docs: true            # NL docs
+  concepts: true        # concept catalog/aliases/attributes/rules
+  synonyms: true        # synonyms.json, concept_synonyms, etc.
+  schema: true          # schema.json / physical structure training
+  relationships: true   # relationships.json / FK graph
+  ddl: true             # DDL *.sql training
+  profiles: true        # profiling CSV/JSON training
+  attr_map: true        # attribute_map.json (or sanitized version)
+  values: true          # value_aliases/domains artifacts
 
 inputs:
   schema_json: "artifacts/schema.json"
@@ -71,6 +93,9 @@ inputs:
 
 outputs:
   docs_jsonl: "artifacts/schema_docs.jsonl"
+  ddl_dir: "artifacts/ddl"
+  prompts_dir: "artifacts/prompts"
+  concepts_out_dir: "artifacts/concepts"
   concepts:
     catalog_csv: "artifacts/concepts/concept_catalog.csv"
     alias_csv: "artifacts/concepts/concept_alias.csv"
@@ -85,10 +110,11 @@ vanna:
   # Defaults used when CLI flags don't pass names
   sql:
     mssql_db_name: "reporting_devco"   # key under connections.mssql
-    pg_store_name: "my_postgres2"      # key under connections.postgres (optional; else ChromaDB is used)
+    pg_store_name: "my_postgres2"      # key under connections.postgres (required for PG_VectorStore)
 
-  # Three instances to cover your A/B/C scenarios
-  # Methods supported in vanna_app_poc.py:
+  # Instances aligned to the fidelity grid
+  #
+  # Supported methods (see app/vanna_app_poc.py):
   #   - info_schema
   #   - bundle
   #   - bundle_plus_info
@@ -97,34 +123,33 @@ vanna:
   #
   # bundle_parts (for the *select* methods) can include:
   #   "ddl", "docs", "profiles", "schema", "relationships", "concepts", "synonyms", "attr_map", "values"
+  #
+  # Each instance here corresponds to one row in your test grid.
   instances:
-    # A) Info schema only (schema-scoped)
-    - id: "A_info_only"
+    # 1) Info schema (baseline) — Generic Vanna from live schema only
+    - id: "01_info_only"
       method: "info_schema"
       mssql_db: "reporting_devco"
       schema: "reporting"
-      pg_store: "my_postgres"         # optional; if omitted, ChromaDB is used
-      port: 8084
+      pg_store: "my_postgres"
+      port: 8110
 
-    # B) Info schema + whole bundle
-    - id: "B_info_plus_bundle_whole"
+    # 2) Info schema + full bundle (highest fidelity target)
+    - id: "13_info_full_bundle"
       method: "bundle_plus_info"
       bundle_dir: "artifacts/vanna_bundle"
       mssql_db: "reporting_devco"
       schema: "reporting"
       pg_store: "my_postgres2"
-      port: 8085
+      port: 8122
 
-    # C) Info schema + selected bundle elements (example: docs + concepts)
-    - id: "C_info_plus_selected"
-      method: "bundle_select_plus_info"
+    # 3) Schema + Relationships + DDL only (structural snapshot only)
+    - id: "14_schema_relationships_ddl"
+      method: "bundle_select"
       bundle_dir: "artifacts/vanna_bundle"
-      bundle_parts: ["docs", "concepts"]  # adjust as needed (e.g., ["docs"], ["docs","synonyms"], etc.)
-      mssql_db: "reporting_devco"
-      schema: "reporting"
+      bundle_parts: ["schema", "relationships", "ddl"]
       pg_store: "my_postgres3"
-      port: 8086
-
+      port: 8123
 
 # ---------- Central connection strings (replaces dbAdapter.py) ----------
 connections:
@@ -133,6 +158,5 @@ connections:
     cornerstone_command: "DRIVER={ODBC Driver 17 for SQL Server};SERVER=df2v-apsql-c02,5013;DATABASE=cornerstone_command;UID=system-map;PWD=Re2Kba8vO5"
   postgres:
     my_postgres:  "postgresql://myuser:mypassword@localhost:5432/mydatabase"
-    my_postgres2: "postgresql://myuser:mypassword@localhost:55432/mydatabase2"
-    my_postgres3: "postgresql://myuser:mypassword@localhost:55432/mydatabase2"     # Edit Accordingly
-
+    my_postgres2: "postgresql://myuser:mypassword@localhost:15432/mydatabase2"
+    my_postgres3: "postgresql://myuser:mypassword@localhost:25432/mydatabase3"     # Edit Accordingly

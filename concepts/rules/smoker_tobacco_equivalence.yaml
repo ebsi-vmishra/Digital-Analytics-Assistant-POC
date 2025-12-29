@@ -1,0 +1,5 @@
+id: smoker_tobacco_equivalence
+type: equivalence
+name: "Smoker Alias"
+description: "In business semantics, you can infer 'tobacco' from 'smoker'. Queries about 'tobacco' should consider both unless otherwise filtered."
+relation: "smoker = tobacco = is_smoker"

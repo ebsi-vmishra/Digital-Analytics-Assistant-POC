@@ -1,0 +1,6 @@
+- id: no_emp_to_dep_substitution
+  type: lexical_constraint
+  action: ban_substitution
+  from: "employee"
+  to: "dependent"
+  description: "Do NOT substitute 'dependent' for 'employee'. Treat them as distinct unless a rule explicitly maps them."
